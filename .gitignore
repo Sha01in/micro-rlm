@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment / secrets
+.env
+*.env
+
+# PDF documents
+*.pdf
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+
+# Tool settings
+.claude/
+
+# Editors
+*.swp
+*.swo
+.vscode/
+.idea/
