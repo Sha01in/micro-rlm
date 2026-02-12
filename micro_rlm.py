@@ -41,6 +41,8 @@ parser.add_argument("--n_entries", type=int, default=200, help="Entries in demo 
 parser.add_argument("--compare", action="store_true", help="Also run vanilla LLM for comparison")
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--quiet", action="store_true", help="Less verbose output")
+parser.add_argument("--log", nargs="?", const=".", default=None, metavar="DIR",
+                    help="Log trajectory to JSON (default: current dir)")
 if __name__ == "__main__":
     args = parser.parse_args()
 else:
@@ -49,7 +51,7 @@ else:
         model="claude-sonnet-4-5-20250929", sub_model=None,
         base_url="https://api.anthropic.com/v1/",
         api_key=None, max_iters=15, metadata_chars=800, task="census",
-        n_entries=200, compare=False, seed=42, quiet=False,
+        n_entries=200, compare=False, seed=42, quiet=False, log=None,
     )
 
 API_KEY = args.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -149,6 +151,18 @@ def truncate(text, max_chars):
     h = max_chars // 2
     return f"{text[:h]}\n... [{len(text)} chars total, truncated] ...\n{text[-h:]}"
 
+def _log_path(log_dir, mode, task):
+    """Generate a timestamped JSON path for trajectory logging."""
+    ts = time.strftime("%Y%m%dT%H%M%S")
+    return os.path.join(log_dir, f"{mode}_{task}_{ts}.json")
+
+def _write_trajectory(traj, path):
+    """Write trajectory dict to JSON."""
+    with open(path, "w") as f:
+        json.dump(traj, f, indent=2)
+    if not args.quiet:
+        print(f"  📝 Trajectory logged to {path}")
+
 # ════════════════════════════════════════════════════════════════
 # Section 5: System Prompt — teaches the LLM to be an RLM
 # ════════════════════════════════════════════════════════════════
@@ -209,7 +223,7 @@ Then aggregate and finalize.
 #
 # ════════════════════════════════════════════════════════════════
 
-def rlm(context, query):
+def rlm(context, query, log_path=None, ground_truth=None):
     """The Recursive Language Model inference loop.
 
     Context is placed in a REPL variable — the root LLM never sees it
@@ -217,11 +231,15 @@ def rlm(context, query):
     """
 
     # 1. Create the sub-call function injected into the REPL
+    sub_call_log = []  # shared with llm_query closure; cleared each iteration
+
     def llm_query(prompt):
         stats["sub_calls"] += 1
         if not args.quiet:
             print(f"      📞 sub-call #{stats['sub_calls']} ({len(prompt):,} chars)")
-        return llm_call([{"role": "user", "content": prompt}], model=SUB_MODEL)
+        resp = llm_call([{"role": "user", "content": prompt}], model=SUB_MODEL)
+        sub_call_log.append({"prompt": prompt, "response": resp})
+        return resp
 
     # 2. Initialize REPL with context as variable (Algorithm 1, line 1-2)
     repl = REPL(context, llm_query_fn=llm_query)
@@ -239,18 +257,44 @@ def rlm(context, query):
         )},
     ]
 
-    # 4. RLM loop (Algorithm 1, lines 4-8)
+    # 4. Initialize trajectory log (if logging enabled)
+    traj = None
+    if log_path:
+        traj = {
+            "schema_version": 1, "mode": "rlm", "task": args.task,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "config": {"model": args.model, "sub_model": SUB_MODEL,
+                       "max_iters": args.max_iters, "metadata_chars": args.metadata_chars,
+                       "n_entries": args.n_entries, "seed": args.seed},
+            "context_chars": len(context), "query": query,
+            "ground_truth": ground_truth, "iterations": [],
+        }
+    loop_t0 = time.time()
+
+    # 5. RLM loop (Algorithm 1, lines 4-8)
     for it in range(1, args.max_iters + 1):
         if not args.quiet:
             print(f"\n   🔄 Iteration {it}/{args.max_iters}")
 
+        sub_call_log.clear()
+        iter_t0 = time.time()
+
         # Ask root LLM for next action
         stats["root_calls"] += 1
-        response = llm_call(history, model=args.model)
+        try:
+            response = llm_call(history, model=args.model)
+        except Exception:
+            if traj:
+                traj["answer"] = None
+                traj["stats"] = dict(stats)
+                traj["total_elapsed_s"] = round(time.time() - loop_t0, 2)
+                _write_trajectory(traj, log_path)
+            raise
         history.append({"role": "assistant", "content": response})
 
         # Execute any code blocks
         code = extract_code(response)
+        exec_info = None
         if code:
             if not args.quiet:
                 lines = code.split("\n")
@@ -276,8 +320,30 @@ def rlm(context, query):
             if not args.quiet and stdout.strip():
                 print(f"   📤 Output: {truncate(stdout.strip(), 200)}")
 
+            exec_info = {
+                "stdout": stdout, "had_error": had_error,
+                "metadata_sent": meta, "repl_vars": uvars,
+            }
+
         # Check for FINAL answer (after executing code so variables are set)
         final = extract_final(response)
+
+        # Log this iteration
+        if traj:
+            traj["iterations"].append({
+                "iteration": it,
+                "root_response": response,
+                "code": code,
+                "execution": exec_info,
+                "sub_calls": [{"index": i, "prompt": sc["prompt"],
+                               "prompt_chars": len(sc["prompt"]),
+                               "response": sc["response"],
+                               "response_chars": len(sc["response"])}
+                              for i, sc in enumerate(sub_call_log)],
+                "final": {"kind": final[0], "value": final[1]} if final else None,
+                "elapsed_s": round(time.time() - iter_t0, 2),
+            })
+
         if final:
             kind, value = final
             if kind == "var":
@@ -287,6 +353,11 @@ def rlm(context, query):
             if not args.quiet:
                 label = f"var:{value}" if kind == "var" else "direct"
                 print(f"   ✅ FINAL ({label})")
+            if traj:
+                traj["answer"] = answer
+                traj["stats"] = dict(stats)
+                traj["total_elapsed_s"] = round(time.time() - loop_t0, 2)
+                _write_trajectory(traj, log_path)
             return answer
 
         # If no code and no FINAL, nudge the model
@@ -294,17 +365,38 @@ def rlm(context, query):
             history.append({"role": "user", "content":
                 "No code detected. Write ```repl code to continue, or FINAL(answer)."})
 
-    return "[Exceeded max iterations without a final answer]"
+    answer = "[Exceeded max iterations without a final answer]"
+    if traj:
+        traj["answer"] = answer
+        traj["stats"] = dict(stats)
+        traj["total_elapsed_s"] = round(time.time() - loop_t0, 2)
+        _write_trajectory(traj, log_path)
+    return answer
 
 # ════════════════════════════════════════════════════════════════
 # Section 7: Vanilla Baseline (for comparison)
 # ════════════════════════════════════════════════════════════════
 
-def vanilla_llm(context, query):
+def vanilla_llm(context, query, log_path=None, ground_truth=None):
     """Baseline: stuff context + query directly into the LLM. (Algorithm 2, Flaw #1)"""
+    t0 = time.time()
     stats["root_calls"] += 1
-    return llm_call([{"role": "user", "content":
+    answer = llm_call([{"role": "user", "content":
         f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer concisely:"}])
+    if log_path:
+        _write_trajectory({
+            "schema_version": 1, "mode": "vanilla", "task": args.task,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "config": {"model": args.model},
+            "context_chars": len(context), "query": query,
+            "ground_truth": ground_truth,
+            "iterations": [{"iteration": 1, "root_response": answer, "code": None,
+                            "execution": None, "sub_calls": [], "final": None,
+                            "elapsed_s": round(time.time() - t0, 2)}],
+            "answer": answer, "stats": dict(stats),
+            "total_elapsed_s": round(time.time() - t0, 2),
+        }, log_path)
+    return answer
 
 # ════════════════════════════════════════════════════════════════
 # Section 8: Demo Tasks with Ground Truth
@@ -401,8 +493,11 @@ if __name__ == "__main__":
     else:
         context, query, truth = make_search_task(args.n_entries, seed=args.seed)
 
+    rlm_log = _log_path(args.log, "rlm", args.task) if args.log else None
+    vanilla_log = _log_path(args.log, "vanilla", args.task) if args.log else None
+
     print("╔══════════════════════════════════════════════════════╗")
-    print("║        micro-rlm · Recursive Language Models        ║")
+    print("║        micro-rlm · Recursive Language Models         ║")
     print("╚══════════════════════════════════════════════════════╝")
     print(f"  Task:    {args.task} ({args.n_entries} entries)")
     print(f"  Context: {len(context):,} chars")
@@ -417,7 +512,7 @@ if __name__ == "__main__":
             stats[k] = 0
         t0 = time.time()
         try:
-            v_answer = vanilla_llm(context, query)
+            v_answer = vanilla_llm(context, query, log_path=vanilla_log, ground_truth=truth)
         except Exception as e:
             v_answer = f"[Error: {e}]"
         print(f"  Answer: {v_answer[:300]}")
@@ -429,7 +524,7 @@ if __name__ == "__main__":
     for k in stats:
         stats[k] = 0
     t0 = time.time()
-    answer = rlm(context, query)
+    answer = rlm(context, query, log_path=rlm_log, ground_truth=truth)
     elapsed = time.time() - t0
 
     print(f"\n  {'─'*50}")

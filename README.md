@@ -18,17 +18,17 @@ LLMs suffer from **context rot**: quality degrades as prompts get longer, and th
 Don't feed the prompt into the neural network. **Treat it as an external object** the model interacts with programmatically.
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                    RLM Loop                          │
-│                                                      │
-│  ┌──────────────┐         ┌────────────────────────┐ │
-│  │   Root LLM   │◄───────►│   REPL Environment E   │ │
-│  │              │  code    │                        │ │
-│  │ • sees ONLY  │ ──────► │ • context (the prompt) │ │
-│  │   metadata   │         │ • llm_query() function │ │
-│  │ • writes code│ ◄────── │ • user variables       │ │
-│  │ • reasons    │ truncated│ • Python execution     │ │
-│  └──────────────┘  stdout  └────────────────────────┘ │
+┌───────────────────────────────────────────────────────┐
+│                    RLM Loop                           │
+│                                                       │
+│  ┌──────────────┐         ┌────────────────────────┐  │
+│  │   Root LLM   │◄───────►│   REPL Environment E   │  │
+│  │              │  code   │                        │  │
+│  │ • sees ONLY  │ ──────► │ • context (the prompt) │  │
+│  │   metadata   │         │ • llm_query() function │  │
+│  │ • writes code│ ◄────── │ • user variables       │  │
+│  │ • reasons    │truncated│ • Python execution     │  │
+│  └──────────────┘ stdout  └────────────────────────┘  │
 │         │                           │                 │
 │         │              ┌────────────┘                 │
 │         ▼              ▼                              │
@@ -37,7 +37,7 @@ Don't feed the prompt into the neural network. **Treat it as an external object*
 │  │   (on programmatic slices  │                       │
 │  │    of the context)         │                       │
 │  └────────────────────────────┘                       │
-└──────────────────────────────────────────────────────┘
+└───────────────────────────────────────────────────────┘
 ```
 
 The root LLM **never sees the full prompt**. It only gets constant-size metadata (length, a short preview). It writes code to peek into, chunk, and process slices — invoking itself recursively on each slice via `llm_query()`.
@@ -91,13 +91,17 @@ python micro_rlm.py --model llama3 --base_url http://localhost:11434/v1
 
 # Use any OpenAI-compatible provider (e.g., Together, Groq, OpenAI)
 python micro_rlm.py --model gpt-4o-mini --base_url https://api.openai.com/v1 --api_key sk-...
+
+# Log trajectory to JSON for analysis or training data
+python micro_rlm.py --task census --n_entries 200 --log
+python micro_rlm.py --task census --n_entries 200 --log ./logs  # custom directory
 ```
 
 ## What You'll See
 
 ```
 ╔══════════════════════════════════════════════════════╗
-║        micro-rlm · Recursive Language Models        ║
+║        micro-rlm · Recursive Language Models         ║
 ╚══════════════════════════════════════════════════════╝
   Task:    census (500 entries)
   Context: 38,500 chars
@@ -140,6 +144,17 @@ Like **OOLONG** from the paper — every entry must be processed. Generates N en
 
 ### Document Search (multi-hop)
 Like **BrowseComp-Plus** — clues are planted across specific documents in a sea of distractors. The RLM uses regex/keyword filtering (model priors) to narrow the search space before reading relevant documents with sub-calls.
+
+## Trajectory Logging
+
+Use `--log` to capture the full RLM interaction to JSON for analysis, debugging, or downstream training (the paper's RLM-Qwen3-8B was fine-tuned on 1,000 filtered trajectories — see Section 4/Appendix A).
+
+```bash
+python micro_rlm.py --task census --n_entries 200 --log           # writes rlm_census_*.json
+python micro_rlm.py --task census --n_entries 200 --compare --log # also writes vanilla_census_*.json
+```
+
+Each JSON file contains: config, the query and ground truth, per-iteration deltas (root LLM response, extracted code, execution metadata, full sub-call prompts/responses), the final answer, and stats. Delta-only storage keeps file size linear rather than O(N^2). Partial trajectories are written on API errors so no data is lost.
 
 ## Key Implementation Details
 

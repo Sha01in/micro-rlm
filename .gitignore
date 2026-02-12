@@ -18,6 +18,10 @@ Thumbs.db
 # Tool settings
 .claude/
 
+# Trajectory logs
+rlm_*.json
+vanilla_*.json
+
 # Editors
 *.swp
 *.swo
