@@ -1,0 +1,23 @@
+# JAX training dependencies for micro-rlm
+# Install: uv pip install --target ~/.local/lib/python3.10/site-packages \
+#          --python /usr/bin/python3.10 -r train/requirements.txt
+#
+# Requires CUDA 12+ and compatible NVIDIA driver.
+# JAX GPU install: https://jax.readthedocs.io/en/latest/installation.html
+#
+# Run with these env vars for GPU memory management:
+#   XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
+
+jax[cuda12]>=0.5.0,<0.7
+flax>=0.10.0,<0.11
+optax>=0.2.0,<0.2.6
+orbax-checkpoint>=0.11.5,<0.12
+chex>=0.1.88,<0.1.91
+
+# EasyDel: JAX-native LLM loading (Flax NNX models)
+# Pin exact version — API changes frequently between releases
+easydel==0.1.4.1
+
+# HuggingFace tokenizers and chat templates
+# Must stay on 4.x — EasyDel 0.1.4.1 is incompatible with transformers 5.x
+transformers>=4.44,<5

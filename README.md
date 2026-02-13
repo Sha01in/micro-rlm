@@ -289,6 +289,12 @@ python micro_rlm.py --task census --n_entries 200 --compare --log # also writes 
 
 Each JSON file contains: config, the query and ground truth, per-iteration deltas (root LLM response, extracted code, execution metadata, full sub-call prompts/responses), the final answer, and stats. Delta-only storage keeps file size linear rather than O(N^2). Partial trajectories are written on API errors so no data is lost.
 
+## Training Local Models
+
+`micro_rlm.py` is the complete inference implementation — zero dependencies, single file. The `train/` directory is an optional companion for fine-tuning local models on RLM trajectories using JAX/EasyDel (see the paper's Section 4/Appendix A). It has its own dependencies and its own [README](train/README.md).
+
+The pipeline implements the paper's "virtuous cycle": generate trajectories with API models → train a verifier → fine-tune root + sub models → serve locally → generate better trajectories.
+
 ## Key Implementation Details
 
 **Metadata truncation** (Section 6 of the code) is the most important design choice. After each code execution, only a truncated preview of stdout goes back to the root LLM. This forces the model to store results in REPL variables instead of relying on its context window — which is what makes RLMs fundamentally different from standard coding agents.
@@ -309,7 +315,6 @@ This is a **micro** implementation for learning. Production RLMs would add:
 - **Async sub-calls** — the paper notes all their calls were blocking/sequential
 - **Deeper recursion** — sub-calls could themselves be RLMs (depth > 1)
 - **Cost controls** — budget limits, max sub-calls, timeouts
-- **Native training** — the paper shows fine-tuning on RLM trajectories improves performance by 28% with just 1,000 examples
 
 ## Paper Results (for context)
 

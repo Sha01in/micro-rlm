@@ -22,6 +22,9 @@ Thumbs.db
 rlm_*.json
 vanilla_*.json
 
+# Debug logs
+memory_monitor.log
+
 # Editors
 *.swp
 *.swo
