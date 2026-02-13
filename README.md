@@ -68,6 +68,139 @@ Three design choices that distinguish this from standard agents (Algorithm 2):
 | **Output** | Generated autoregressively | Built up in REPL variables |
 | **Recursion** | Verbalized sub-calls only | Programmatic loops of sub-calls |
 
+## The Whole Algorithm in 125 Lines
+
+Here's a complete, runnable RLM — the entire inference loop from the paper with no CLI, no logging, no extras. Just the idea. The full-featured version is [`micro_rlm.py`](micro_rlm.py).
+
+```python
+"""
+The most atomic way to inference a Recursive Language Model (RLM) in pure, dependency-free Python.
+This file is the complete Algorithm 1 from Zhang et al. (2026).
+Everything else is just efficiency.
+
+@karpathy-style
+"""
+
+import os       # os.environ
+import re       # re.search
+import io       # io.StringIO
+import json     # json.dumps, json.loads
+import urllib.request # urllib.request.Request, urllib.request.urlopen
+import contextlib     # contextlib.redirect_stdout
+import random   # random.seed, random.random, random.randint
+random.seed(42) # Let there be order among chaos
+
+# Let there be an input dataset `docs`: a massive context too large for standard LLM attention
+print("generating infinite context...")
+docs = []
+for i in range(1000): # 1000 documents
+    # 5% of the time it's an anomaly that requires semantic reasoning to detect
+    if random.random() < 0.05:
+        docs.append(f"Doc {i:04d} | Note: A critical system failure was narrowly avoided. | Cost: ${random.randint(100, 999)}")
+    else:
+        docs.append(f"Doc {i:04d} | Note: All systems operating within normal parameters. | Cost: ${random.randint(0, 99)}")
+context = "\n".join(docs)
+print(f"context size: {len(context)} chars")
+
+query = "Find the exact sum of all 'Cost's in the documents that describe a critical system failure. Because the dataset is too long, chunk it and use llm_query to safely extract and sum the values."
+
+# Let there be an LLM API, the neural engine of our system
+# (Anthropic's OpenAI-compatible endpoint; works with any provider that speaks this format)
+api_key = os.environ.get("ANTHROPIC_API_KEY", "sk-ant-...")
+api_url = "https://api.anthropic.com/v1/chat/completions"
+model_root = "claude-sonnet-4-5-20250929"  # The root reasoning model that writes code
+model_sub = "claude-haiku-4-5-20251001"    # The recursive sub-call model for semantic slices
+
+def llm(messages, model=model_root):
+    """Stateless forward pass of a neural language model."""
+    req = urllib.request.Request(api_url, method="POST",
+        data=json.dumps({"model": model, "messages": messages, "temperature": 0.0}).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())["choices"][0]["message"]["content"]
+
+# Let there be an Environment E: A persistent REPL holding the prompt.
+# Crucially, the long context lives HERE in memory, not polluted into the LLM's context window.
+class REPL:
+    def __init__(self, context_data):
+        def sub_call(p):
+            print(f"    [sub-call] querying {model_sub} with {len(p)} chars...")
+            return llm([{"role": "user", "content": p}], model_sub)
+        self.namespace = {
+            "context": context_data,
+            # Inject recursive sub-call capability into the environment
+            "llm_query": sub_call
+        }
+        exec("import re, json, collections", self.namespace)
+
+    def execute(self, code):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                exec(code, self.namespace)
+            except Exception as e:
+                print(f"{type(e).__name__}: {e}")
+        return buf.getvalue()
+
+repl = REPL(context)
+
+# Initialize the RLM state (Algorithm 1)
+max_iters = 10
+max_meta_chars = 800
+
+# The system prompt teaches the base model how to behave recursively
+sys_prompt = f"""You are a Recursive Language Model.
+A vast text corpus is stored in your Python environment as `context` ({len(context)} chars).
+You do NOT have direct access to it in your prompt.
+You must write Python code in fenced code blocks to peek at, chunk, and process `context`.
+You have a function `llm_query(prompt)` to query a sub-LLM for semantic evaluations over chunks.
+IMPORTANT: You will only see the first {max_meta_chars} characters of stdout. Store large results in variables!
+When you have aggregated the final answer, output: FINAL(your answer) or FINAL_VAR(variable_name)"""
+
+hist = [
+    {"role": "system", "content": sys_prompt},
+    {"role": "user", "content": f"Query: {query}\n\nExplore `context` using python code."}
+]
+
+# Repeat in sequence (Algorithm 1 Execution Loop)
+if api_key == "sk-ant-...":
+    print("\nWARNING: ANTHROPIC_API_KEY environment variable not set. Please provide one.")
+else:
+    print("\n--- beginning rlm inference loop ---")
+    for step in range(max_iters):
+
+        # Forward the history to generate thoughts and code
+        response = llm(hist)
+        hist.append({"role": "assistant", "content": response})
+        print(f"\n[step {step+1} LLM]\n{response.strip()}")
+
+        # Extract ALL code blocks and execute them in the REPL
+        fence = "`" * 3
+        code_blocks = re.findall(fence + r"(?:python|repl)?\n(.*?)" + fence, response, re.DOTALL)
+        if code_blocks:
+            stdout = repl.execute("\n".join(code_blocks))
+
+            # TRUNCATION IS KEY: this prevents context rot and forces the LLM
+            # to aggregate symbolically in the REPL, not in its context window.
+            stdout_trunc = stdout[:max_meta_chars] + ("\n...[truncated]" if len(stdout) > max_meta_chars else "")
+            hist.append({"role": "user", "content": f"Output:\n{stdout_trunc}"})
+            print(f"\n[step {step+1} REPL]\n{stdout_trunc.strip()}")
+        else:
+            hist.append({"role": "user", "content": "No code found. Write python or FINAL()."})
+
+        # Check for final answer AFTER executing code (so FINAL_VAR variables exist)
+        if match := re.search(r"FINAL_VAR\((.+?)\)", response):
+            ans = repl.namespace.get(match.group(1), "[Variable Not Found]")
+            print(f"\n[final answer (var)]\n{ans}")
+            break
+        if match := re.search(r"FINAL\((.*?)\)", response, re.S):
+            ans = match.group(1).strip()
+            print(f"\n[final answer]\n{ans}")
+            break
+    else:
+        print("\n[RLM] exceeded maximum iterations.")
+```
+
 ## Quick Start
 
 ```bash
